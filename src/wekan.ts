@@ -134,16 +134,29 @@ export class Wekan {
 
   private async requestWithAuth(path: string, options: any): Promise<any> {
     const headers = await this.headers();
-    const r = await request(`${this.opts.baseUrl}${path}`, {
-      ...options,
-      headers: { ...headers, ...options.headers }
-    });
-    
-    if (r.statusCode >= 400) {
+    const maxRetries = 2;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const r = await request(`${this.opts.baseUrl}${path}`, {
+        ...options,
+        headers: { ...headers, ...options.headers }
+      });
+
+      if (r.statusCode < 400) {
+        return r.body.json();
+      }
+
+      // Retry on 5xx (server transient errors) if not last attempt
+      if (r.statusCode >= 500 && attempt < maxRetries) {
+        // Consume body to avoid memory leak
+        await r.body.text().catch(() => {});
+        const delay = attempt * 1000;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+
       throw new Error(`${options.method || 'GET'} ${path} -> ${r.statusCode}`);
     }
-    
-    return r.body.json();
   }
 
   async get(path: string): Promise<any> {
@@ -679,7 +692,13 @@ export class Wekan {
 
       // Get cards from pending lists
       for (const list of pendingLists) {
-        const cards = await this.listCards(board._id, list._id);
+        let cards: WekanCard[];
+        try {
+          cards = await this.listCards(board._id, list._id);
+        } catch (e) {
+          // Skip list on error (e.g. transient 502) instead of aborting entire operation
+          continue;
+        }
 
         for (const card of cards) {
           // Filter by current user
